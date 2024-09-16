@@ -1,23 +1,36 @@
-import json
+import traceback
 from oauthlib.oauth1 import SIGNATURE_PLAINTEXT
 from requests_oauthlib import OAuth1Session
-from ansible.plugins.lookup import LookupBase
+from ansible.plugins.action import ActionBase
 from ansible.errors import AnsibleError
+from requests.exceptions import HTTPError
 
 
-class LookupModule(LookupBase):
-    def run(self, terms, variables=None, **kwargs):
+class ActionModule(ActionBase):
+
+    def run(self, tmp=None, task_vars=None):
+        result = super(ActionModule, self).run(tmp, task_vars)
+        result["failed"] = False
+
         required_args = ["api_key", "url", "http_method"]
         for argname in required_args:
-            if argname not in kwargs:
+            if argname not in self._task.args:
                 raise AnsibleError(f'required argument: "{argname}"')
 
         try:
-            consumer_key, consumer_token, secret = kwargs["api_key"].split(":")
+            consumer_key, consumer_token, secret = self._task.args["api_key"].split(":")
         except ValueError as e:
             raise AnsibleError(
                 'Invalid format for "api_key". Expected "consumer_key:consumer_token:secret".'
             ) from e
+
+        http_method = self._task.args["http_method"].lower()
+        url = self._task.args["url"]
+        data = self._task.args.get("data", {})
+
+        if self._play_context.check_mode and http_method != "get":
+            result["skipped"] = True
+            return result
 
         session = OAuth1Session(
             consumer_key,
@@ -25,10 +38,6 @@ class LookupModule(LookupBase):
             resource_owner_secret=secret,
             signature_method=SIGNATURE_PLAINTEXT,
         )
-
-        http_method = kwargs["http_method"].lower()
-        url = kwargs["url"]
-        data = kwargs.get("data", {})
 
         if http_method == "get":
             response = session.get(url, data=data)
@@ -41,13 +50,12 @@ class LookupModule(LookupBase):
         else:
             raise AnsibleError(f'Unsupported HTTP method: "{http_method.upper()}"')
 
-        response.raise_for_status()
-
-        if response.text == "":
-            return [None]
         try:
-            return [response.json()]
-        except json.JSONDecodeError as e:
-            raise AnsibleError(
-                f"API response was not empty string or JSON:\n{response.text}"
-            ) from e
+            response.raise_for_status()
+        except HTTPError:
+            result["failed"] = True
+            result["msg"] = traceback.format_exc()
+            return result
+
+        result["response"] = response
+        return result
